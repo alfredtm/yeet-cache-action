@@ -17,9 +17,9 @@ inputs:
     required: false
     default: 'ghcr.io'
   registry-username:
-    description: 'Username for registry login.'
+    description: 'Username for registry login. Defaults to $GITHUB_ACTOR.'
     required: false
-    default: ${{ github.actor }}
+    default: ''
   registry-password:
     description: 'Password or token for registry login. Typically secrets.GITHUB_TOKEN.'
     required: true
@@ -74,7 +74,8 @@ runs:
         REG_USER: ${{ inputs.registry-username }}
         REG_PASS: ${{ inputs.registry-password }}
       run: |
-        echo "$REG_PASS" | crane auth login "$REG" -u "$REG_USER" --password-stdin
+        USER="${REG_USER:-$GITHUB_ACTOR}"
+        echo "$REG_PASS" | crane auth login "$REG" -u "$USER" --password-stdin
 
     - name: Compute source hash and check registry
       id: check
