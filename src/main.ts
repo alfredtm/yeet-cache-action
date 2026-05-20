@@ -97,10 +97,7 @@ async function main(): Promise<void> {
       const tagStart = nowMs()
       const tagList = tags.split(',').map((t) => t.trim()).filter(Boolean)
       const results = await Promise.all(
-        tagList.map(async (t) => {
-          const ref = t.includes('/') || t.includes('@') ? t : `${image}:${t}`
-          return run('crane', ['tag', srcTag, ref])
-        })
+        tagList.map((t) => run('crane', ['tag', srcTag, t]))
       )
       for (const r of results) {
         if (r.exitCode !== 0) {
