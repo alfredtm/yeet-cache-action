@@ -180,7 +180,9 @@ func resolveTag(repo name.Repository, t string) (name.Reference, error) {
 }
 
 // Retag points each tag in dsts at the manifest currently behind src. Runs
-// dsts in parallel. Bare tags are resolved against src's repo.
+// dsts in parallel. Bare tags are resolved against src's repo. Uses
+// remote.Tag (manifest rebind) instead of remote.Write so we skip the
+// per-blob existence checks — all blobs are already in the repo.
 func Retag(src string, dsts []string) ([]string, error) {
 	srcRef, err := name.ParseReference(src)
 	if err != nil {
@@ -189,10 +191,6 @@ func Retag(src string, dsts []string) ([]string, error) {
 	desc, err := remote.Get(srcRef, auth())
 	if err != nil {
 		return nil, fmt.Errorf("resolve src: %w", err)
-	}
-	img, err := desc.Image()
-	if err != nil {
-		return nil, fmt.Errorf("decode src: %w", err)
 	}
 
 	applied := make([]string, len(dsts))
@@ -207,7 +205,11 @@ func Retag(src string, dsts []string) ([]string, error) {
 			if err != nil {
 				return err
 			}
-			if err := remote.Write(ref, img, auth()); err != nil {
+			tag, ok := ref.(name.Tag)
+			if !ok {
+				return fmt.Errorf("destination must be a tag: %s", t)
+			}
+			if err := remote.Tag(tag, desc, auth()); err != nil {
 				return err
 			}
 			applied[i] = ref.Name()
