@@ -37,9 +37,13 @@ inputs:
     required: false
     default: ''
   sign:
-    description: '"true" to verify GitHub attestation on cache hit and auto-attest the built image on cache miss (post hook). Requires permissions { id-token: write, attestations: write }.'
+    description: '"true" to auto-attest the built image on cache miss via the post hook, and verify on cache hit. Requires permissions { id-token: write, attestations: write }.'
     required: false
     default: 'false'
+  verify-on-hit:
+    description: '"true" (default) to verify the cosign/attestation signature on cache hit before retagging. Set to "false" for trust-on-first-use semantics — cache hits are retagged without re-verification. Saves ~3-4s per no-op push. Tradeoff: a compromised registry tag would not be caught at hit time; rely on registry write-access controls instead.'
+    required: false
+    default: 'true'
   verify-identity:
     description: 'Override for the workflow identity regex used during verification. Defaults to any workflow in $GITHUB_REPOSITORY.'
     required: false

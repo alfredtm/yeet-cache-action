@@ -21,6 +21,7 @@ async function main(): Promise<void> {
   const registryPassword = core.getInput('registry-password', { required: true })
   const tags = core.getInput('tags')
   const sign = core.getInput('sign') === 'true'
+  const verifyOnHit = (core.getInput('verify-on-hit') || 'true') === 'true'
   const verifyIdentity = core.getInput('verify-identity') || defaultVerifyIdentity()
   const yeetPackOverride = core.getInput('yeet-pack-binary-path')
 
@@ -71,7 +72,7 @@ async function main(): Promise<void> {
   if (check.exitCode === 0) {
     core.notice(`CACHE HIT — ${srcTag}`)
 
-    if (sign) {
+    if (sign && verifyOnHit) {
       const verifyStart = nowMs()
       const owner = ownerFromImage(image)
       const verify = await run('gh', [
@@ -88,6 +89,8 @@ async function main(): Promise<void> {
         throw new Error('attestation verification failed')
       }
       logTiming('attestation verify', verifyStart)
+    } else if (sign) {
+      core.info('verify-on-hit disabled — skipping attestation verification (trust-on-first-use)')
     }
 
     if (tags) {
