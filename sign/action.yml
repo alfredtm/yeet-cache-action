@@ -1,5 +1,5 @@
 name: 'Yeet Cache: sign'
-description: 'Sign a content-addressed cache image with cosign keyless. Use after a cache-miss build so the next run with the same source can verify the cached image is trustworthy.'
+description: 'Sign a content-addressed cache image with cosign keyless. Use after a cache-miss build so the next run can verify the cached image is trustworthy.'
 author: 'alfredtm'
 branding:
   icon: 'lock'
@@ -7,7 +7,7 @@ branding:
 
 inputs:
   src-tag:
-    description: 'Full image reference to sign (e.g. ghcr.io/owner/repo:src-aabf3d55da34). Typically the src-tag output of the parent yeet-cache-action.'
+    description: 'Full image reference to sign (e.g. ghcr.io/owner/repo:src-aabf3d55da34).'
     required: true
   registry:
     description: 'Registry hostname for login.'
@@ -18,20 +18,35 @@ inputs:
     required: false
     default: ''
   registry-password:
-    description: 'Password or token. Typically secrets.GITHUB_TOKEN.'
+    description: 'Password or token.'
     required: true
   cosign-version:
-    description: 'Cosign version (e.g. v2.4.1) or "latest".'
+    description: 'Cosign version (e.g. v2.4.1).'
     required: false
     default: 'v2.4.1'
 
 runs:
   using: 'composite'
   steps:
-    - name: Install cosign
-      uses: sigstore/cosign-installer@v3
+    - name: Cache cosign binary
+      uses: actions/cache@v4
       with:
-        cosign-release: ${{ inputs.cosign-version }}
+        path: /usr/local/bin/cosign
+        key: yeet-cosign-${{ inputs.cosign-version }}-linux-amd64
+
+    - name: Install cosign
+      shell: bash
+      env:
+        COSIGN_VERSION: ${{ inputs.cosign-version }}
+      run: |
+        if [ -x /usr/local/bin/cosign ]; then
+          echo "cosign restored: $(cosign version 2>&1 | head -1)"
+          exit 0
+        fi
+        curl -sL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /tmp/cosign
+        chmod +x /tmp/cosign
+        sudo mv /tmp/cosign /usr/local/bin/cosign
+        cosign version
 
     - name: Authenticate cosign with registry
       shell: bash
@@ -49,7 +64,6 @@ runs:
         SRC_TAG: ${{ inputs.src-tag }}
       run: |
         START=$(date +%s%N)
-        echo "::notice::signing $SRC_TAG (cosign keyless via GitHub OIDC)"
         cosign sign --yes "$SRC_TAG"
         END=$(date +%s%N)
         echo "::notice::cosign sign took $(( (END - START) / 1000000 ))ms"

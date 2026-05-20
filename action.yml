@@ -7,8 +7,13 @@ branding:
 
 inputs:
   paths:
-    description: 'Space-separated list of paths to hash (e.g. "cmd internal go.mod go.sum"). Uses git tree hashes — each path must exist in HEAD.'
-    required: true
+    description: 'Space-separated list of paths to hash via git tree hashes. Required unless `hash` is provided. Each path must exist in HEAD.'
+    required: false
+    default: ''
+  hash:
+    description: 'Pre-computed source hash (any hex string). When provided, bypasses paths/git so the action does not require a checked-out repo. Useful for fast cache lookups before checkout. Combined with `extra` to form the final cache key.'
+    required: false
+    default: ''
   image:
     description: 'OCI image repository without tag (e.g. ghcr.io/owner/repo).'
     required: true
@@ -28,11 +33,11 @@ inputs:
     description: 'Password or token for registry login. Typically secrets.GITHUB_TOKEN.'
     required: true
   tags:
-    description: 'Comma-separated tags to apply when cache hits (e.g. "$GITHUB_SHA,latest"). Skipped on cache miss — caller is responsible for tagging the freshly-built image with the src-tag output.'
+    description: 'Comma-separated tags to apply when cache hits (e.g. "$GITHUB_SHA,latest").'
     required: false
     default: ''
   sign:
-    description: 'When "true", verify cosign keyless signature on cache hit before retagging. Use yeet-cache-action/sign@v1 after build to populate signed entries. Caller workflow must declare permissions { id-token: write }.'
+    description: 'When "true", verify cosign keyless signature on cache hit. Caller must declare permissions { id-token: write }.'
     required: false
     default: 'false'
   verify-identity:
@@ -44,7 +49,7 @@ inputs:
     required: false
     default: 'latest'
   cosign-version:
-    description: 'Cosign version (e.g. v2.4.1) or "latest". Used only when sign=true.'
+    description: 'Cosign version (e.g. v2.4.1). Used only when sign=true.'
     required: false
     default: 'v2.4.1'
 
@@ -53,10 +58,10 @@ outputs:
     description: '"true" if an image with the computed source hash exists in the registry (and signature verified, when sign=true).'
     value: ${{ steps.check.outputs.hit }}
   src-hash:
-    description: '12-char content address derived from paths + extra.'
+    description: '12-char content address derived from paths/hash + extra.'
     value: ${{ steps.check.outputs.src-hash }}
   src-tag:
-    description: 'Full <image>:src-<hash> reference. Tag your freshly-built image with this on cache miss to populate the cache.'
+    description: 'Full <image>:src-<hash> reference. Tag your freshly-built image with this on cache miss.'
     value: ${{ steps.check.outputs.src-tag }}
   cached-tag:
     description: 'Same as src-tag, but only set on cache hit.'
@@ -71,23 +76,50 @@ runs:
         path: /usr/local/bin/crane
         key: yeet-crane-${{ inputs.crane-version }}-linux-amd64
 
-    - name: Install crane
+    - name: Cache cosign binary
+      if: inputs.sign == 'true'
+      uses: actions/cache@v4
+      with:
+        path: /usr/local/bin/cosign
+        key: yeet-cosign-${{ inputs.cosign-version }}-linux-amd64
+
+    - name: Install tools (crane + cosign in parallel)
       shell: bash
       env:
         CRANE_VERSION: ${{ inputs.crane-version }}
+        COSIGN_VERSION: ${{ inputs.cosign-version }}
+        WANT_COSIGN: ${{ inputs.sign }}
       run: |
-        if [ -x /usr/local/bin/crane ]; then
-          echo "crane restored from cache: $(crane version 2>&1 | head -1)"
-          exit 0
+        install_crane() {
+          if [ -x /usr/local/bin/crane ]; then return 0; fi
+          if [ "$CRANE_VERSION" = "latest" ]; then
+            URL="https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz"
+          else
+            URL="https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+          fi
+          curl -sL "$URL" | tar xz crane
+          sudo mv crane /usr/local/bin/
+        }
+
+        install_cosign() {
+          if [ -x /usr/local/bin/cosign ]; then return 0; fi
+          curl -sL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /tmp/cosign
+          chmod +x /tmp/cosign
+          sudo mv /tmp/cosign /usr/local/bin/cosign
+        }
+
+        install_crane &
+        CRANE_PID=$!
+        if [ "$WANT_COSIGN" = "true" ]; then
+          install_cosign &
+          COSIGN_PID=$!
         fi
-        if [ "$CRANE_VERSION" = "latest" ]; then
-          URL="https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz"
-        else
-          URL="https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+        wait $CRANE_PID
+        if [ "$WANT_COSIGN" = "true" ]; then
+          wait $COSIGN_PID
+          echo "cosign ready: $(cosign version 2>&1 | head -1)"
         fi
-        curl -sL "$URL" | tar xz crane
-        sudo mv crane /usr/local/bin/
-        crane version
+        echo "crane ready: $(crane version 2>&1 | head -1)"
 
     - name: Login to registry
       shell: bash
@@ -105,23 +137,29 @@ runs:
       env:
         IMAGE: ${{ inputs.image }}
         PATHS: ${{ inputs.paths }}
+        HASH_INPUT: ${{ inputs.hash }}
         EXTRA: ${{ inputs.extra }}
       run: |
-        REFS=""
-        for p in $PATHS; do
-          REFS="$REFS HEAD:$p"
-        done
-
-        if ! TREE_HASHES=$(git rev-parse $REFS 2>&1); then
-          echo "::error::failed to compute git tree hashes for: $PATHS"
-          echo "$TREE_HASHES"
+        if [ -z "$HASH_INPUT" ] && [ -z "$PATHS" ]; then
+          echo "::error::either 'paths' or 'hash' input must be provided"
           exit 1
         fi
 
-        # Mix `extra` into the hash so build flags / toolchain version / base
-        # image digest can also invalidate the cache.
-        HASH=$( (printf '%s\n' "$TREE_HASHES"; printf 'extra:%s\n' "$EXTRA") | sha256sum | cut -c1-12 )
+        if [ -n "$HASH_INPUT" ]; then
+          BASE_HASH="$HASH_INPUT"
+        else
+          REFS=""
+          for p in $PATHS; do
+            REFS="$REFS HEAD:$p"
+          done
+          if ! BASE_HASH=$(git rev-parse $REFS 2>&1); then
+            echo "::error::failed to compute git tree hashes for: $PATHS"
+            echo "$BASE_HASH"
+            exit 1
+          fi
+        fi
 
+        HASH=$( (printf '%s\n' "$BASE_HASH"; printf 'extra:%s\n' "$EXTRA") | sha256sum | cut -c1-12 )
         SRC_TAG="${IMAGE}:src-${HASH}"
 
         {
@@ -130,9 +168,6 @@ runs:
         } >> "$GITHUB_OUTPUT"
 
         echo "::notice::source hash = $HASH"
-        if [ -n "$EXTRA" ]; then
-          echo "  (extra: $EXTRA)"
-        fi
 
         if crane manifest "$SRC_TAG" >/dev/null 2>&1; then
           echo "hit=true" >> "$GITHUB_OUTPUT"
@@ -143,12 +178,6 @@ runs:
           echo "::notice::cache miss — $SRC_TAG not in registry"
         fi
 
-    - name: Install cosign
-      if: steps.check.outputs.hit == 'true' && inputs.sign == 'true'
-      uses: sigstore/cosign-installer@v3
-      with:
-        cosign-release: ${{ inputs.cosign-version }}
-
     - name: Verify cosign signature
       if: steps.check.outputs.hit == 'true' && inputs.sign == 'true'
       shell: bash
@@ -158,13 +187,12 @@ runs:
       run: |
         START=$(date +%s%N)
         IDENT="${IDENTITY:-^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/.+$}"
-        echo "verifying $SRC_TAG against identity $IDENT"
         if ! cosign verify \
           --certificate-identity-regexp "$IDENT" \
           --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
           "$SRC_TAG" >/dev/null 2>&1; then
           echo "::error::cache image $SRC_TAG failed cosign verification."
-          echo "::error::This means the cache was either tampered with, built before signing was enabled,"
+          echo "::error::Cache may have been tampered with, built before signing was enabled,"
           echo "::error::or built by an unexpected workflow identity. Refusing to retag."
           exit 1
         fi
@@ -180,11 +208,13 @@ runs:
       run: |
         START=$(date +%s%N)
         IFS=',' read -ra TAG_ARR <<< "$TAGS"
+        PIDS=()
         for t in "${TAG_ARR[@]}"; do
           t="$(echo "$t" | tr -d '[:space:]')"
           [ -z "$t" ] && continue
-          echo "tagging cached image as $t"
-          crane tag "$SRC_TAG" "$t"
+          ( crane tag "$SRC_TAG" "$t" && echo "tagged $t" ) &
+          PIDS+=($!)
         done
+        for pid in "${PIDS[@]}"; do wait "$pid"; done
         END=$(date +%s%N)
         echo "::notice::yeet-cache promoted in $(( (END - START) / 1000000 ))ms"
