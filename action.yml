@@ -1,0 +1,127 @@
+name: 'Yeet Cache'
+description: 'Content-addressed CI build skip via OCI registry. Skip image builds entirely when source files are unchanged.'
+author: 'alfredtm'
+branding:
+  icon: 'fast-forward'
+  color: 'purple'
+
+inputs:
+  paths:
+    description: 'Space-separated list of paths to hash (e.g. "cmd internal go.mod go.sum"). Uses git tree hashes — must exist in HEAD.'
+    required: true
+  image:
+    description: 'OCI image repository without tag (e.g. ghcr.io/owner/repo).'
+    required: true
+  registry:
+    description: 'Registry hostname for login.'
+    required: false
+    default: 'ghcr.io'
+  registry-username:
+    description: 'Username for registry login.'
+    required: false
+    default: ${{ github.actor }}
+  registry-password:
+    description: 'Password or token for registry login. Typically secrets.GITHUB_TOKEN.'
+    required: true
+  tags:
+    description: 'Comma-separated tags to apply when cache hits (e.g. "${{ github.sha }},latest"). Skipped on cache miss — caller is responsible for tagging the freshly-built image with "src-<src-hash>" so the next run hits.'
+    required: false
+    default: ''
+  crane-version:
+    description: 'Crane version to install (e.g. v0.20.2) or "latest".'
+    required: false
+    default: 'latest'
+
+outputs:
+  hit:
+    description: '"true" if an image with the computed source hash exists in the registry, otherwise "false".'
+    value: ${{ steps.check.outputs.hit }}
+  src-hash:
+    description: 'The 12-char content-address of the source paths. Tag your freshly built image with "src-<this>" on cache miss to populate the cache.'
+    value: ${{ steps.check.outputs.src-hash }}
+  cached-tag:
+    description: 'Full reference to the cached image (only set on cache hit). Format: "<image>:src-<src-hash>".'
+    value: ${{ steps.check.outputs.cached-tag }}
+  src-tag:
+    description: 'The full src-hash tag reference (set whether or not the cache hit). Tag your freshly built image with this on cache miss.'
+    value: ${{ steps.check.outputs.src-tag }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install crane
+      shell: bash
+      env:
+        CRANE_VERSION: ${{ inputs.crane-version }}
+      run: |
+        if command -v crane >/dev/null; then
+          echo "crane already installed: $(crane version 2>&1 | head -1)"
+          exit 0
+        fi
+        if [ "$CRANE_VERSION" = "latest" ]; then
+          URL="https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz"
+        else
+          URL="https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz"
+        fi
+        curl -sL "$URL" | tar xz crane
+        sudo mv crane /usr/local/bin/
+        crane version
+
+    - name: Login to registry
+      shell: bash
+      env:
+        REG: ${{ inputs.registry }}
+        REG_USER: ${{ inputs.registry-username }}
+        REG_PASS: ${{ inputs.registry-password }}
+      run: |
+        echo "$REG_PASS" | crane auth login "$REG" -u "$REG_USER" --password-stdin
+
+    - name: Compute source hash and check registry
+      id: check
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        PATHS: ${{ inputs.paths }}
+      run: |
+        REFS=""
+        for p in $PATHS; do
+          REFS="$REFS HEAD:$p"
+        done
+
+        if ! HASH=$( (git rev-parse $REFS) 2>&1 | sha256sum | cut -c1-12 ); then
+          echo "::error::failed to compute git tree hashes for: $PATHS"
+          exit 1
+        fi
+
+        SRC_TAG="${IMAGE}:src-${HASH}"
+
+        echo "src-hash=$HASH" >> "$GITHUB_OUTPUT"
+        echo "src-tag=$SRC_TAG" >> "$GITHUB_OUTPUT"
+        echo "::notice::source hash = $HASH"
+
+        if crane manifest "$SRC_TAG" >/dev/null 2>&1; then
+          echo "hit=true" >> "$GITHUB_OUTPUT"
+          echo "cached-tag=$SRC_TAG" >> "$GITHUB_OUTPUT"
+          echo "::notice::CACHE HIT — image already exists at $SRC_TAG, build will be skipped"
+        else
+          echo "hit=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::cache miss — no image found at $SRC_TAG, build required"
+        fi
+
+    - name: Promote cached image to additional tags
+      if: steps.check.outputs.hit == 'true' && inputs.tags != ''
+      shell: bash
+      env:
+        SRC_TAG: ${{ steps.check.outputs.cached-tag }}
+        TAGS: ${{ inputs.tags }}
+      run: |
+        START=$(date +%s%N)
+        IFS=',' read -ra TAG_ARR <<< "$TAGS"
+        for t in "${TAG_ARR[@]}"; do
+          t="$(echo "$t" | tr -d '[:space:]')"
+          [ -z "$t" ] && continue
+          echo "→ tagging cached image as $t"
+          crane tag "$SRC_TAG" "$t"
+        done
+        END=$(date +%s%N)
+        echo "::notice::yeet-cache promoted in $(( (END - START) / 1000000 ))ms"
