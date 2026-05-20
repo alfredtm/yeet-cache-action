@@ -24,6 +24,10 @@ inputs:
     description: 'Cosign version (e.g. v2.4.1).'
     required: false
     default: 'v2.4.1'
+  tlog-upload:
+    description: 'Upload signature to the sigstore transparency log (Rekor). Defaults to "true" for full supply-chain auditability. Set to "false" to skip — the signature remains cryptographically valid, but there will be no public record in Rekor. Trades audit trail for ~9s of CI time.'
+    required: false
+    default: 'true'
 
 runs:
   using: 'composite'
@@ -62,8 +66,14 @@ runs:
       shell: bash
       env:
         SRC_TAG: ${{ inputs.src-tag }}
+        TLOG_UPLOAD: ${{ inputs.tlog-upload }}
       run: |
         START=$(date +%s%N)
-        cosign sign --yes "$SRC_TAG"
+        FLAGS="--yes"
+        if [ "$TLOG_UPLOAD" = "false" ]; then
+          FLAGS="$FLAGS --tlog-upload=false"
+          echo "::notice::cosign signing without Rekor transparency log upload"
+        fi
+        cosign sign $FLAGS "$SRC_TAG"
         END=$(date +%s%N)
         echo "::notice::cosign sign took $(( (END - START) / 1000000 ))ms"
