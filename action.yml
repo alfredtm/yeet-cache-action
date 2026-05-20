@@ -24,7 +24,7 @@ inputs:
     description: 'Password or token for registry login. Typically secrets.GITHUB_TOKEN.'
     required: true
   tags:
-    description: 'Comma-separated tags to apply when cache hits (e.g. "${{ github.sha }},latest"). Skipped on cache miss — caller is responsible for tagging the freshly-built image with "src-<src-hash>" so the next run hits.'
+    description: 'Comma-separated tags to apply when cache hits (e.g. "$GITHUB_SHA,latest"). Skipped on cache miss — caller is responsible for tagging the freshly-built image with "src-<src-hash>" so the next run hits.'
     required: false
     default: ''
   crane-version:
