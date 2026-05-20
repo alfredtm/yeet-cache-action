@@ -1,32 +1,22 @@
 # yeet-cache-action
 
-**Skip CI image builds entirely when nothing has changed.** A GitHub Action that uses your OCI registry as a content-addressed cache — if you've built an image from these exact source files before, it retags the existing image and exits in ~1 second.
+**Skip CI image builds when source hasn't changed.** Hashes your build inputs, asks your registry *"do you already have an image for this hash?"*, and on a hit retags the cached image in ~1 second. Works in front of any image builder. Optionally verifies cosign signatures on cache hits to prevent registry-tag spoofing.
 
-```
-docker workflow:        66s
-ko workflow:            20s
-crane workflow (cold):  ~10s
-crane workflow + yeet:  1.2s   ← when source is unchanged
-```
+See [SPEC.md](./SPEC.md) for the `:src-<hex>` tag convention.
 
-Works in front of any image builder: `crane`, `ko`, `docker buildx`, `kaniko`, `buildah`.
+## Comparison times
 
----
+Measured on `ubuntu-latest` against a Go service with realistic deps (chi, pgx, prometheus, otel):
 
-## How it works
+| Workflow | Build (cache miss) | No-op push (cache hit) |
+|---|---|---|
+| `docker buildx` + GHA cache | **66s** | 66s (re-validates layers) |
+| `ko publish` | **20s** | 20s (no whole-build cache) |
+| `crane append` + `yeet-cache` | **~15s** | **4.4s actual work, 15s wall** |
 
-Most CI systems cache *layers* or *steps*. `yeet-cache-action` caches the *entire build output* by asking your registry: "do you already have an image built from these exact files?"
-
-1. Hash the configured source paths using `git rev-parse HEAD:<path>` — Git already content-addresses every tree, so this is ~milliseconds and 100% deterministic.
-2. Check whether `${image}:src-<hash>` exists in the registry (one HTTP HEAD).
-3. **Hit**: retag the cached image to your release tags. Done. The action exits in ~1 second.
-4. **Miss**: output `hit=false` and the computed hash. The caller builds the image, pushes it, and tags it `:src-<hash>` so the next run with the same source hits.
-
-Because builds of stateless code are deterministic, the result of the build is fully determined by its inputs. If the inputs haven't changed, the output is already in the registry. Don't rebuild it — *look it up.*
+`yeet-cache` is the only one of these that skips entirely when source is unchanged. The 15s wall on cache hit is mostly GitHub Actions overhead — the action itself does 4.4s of registry calls.
 
 ## Usage
-
-### Minimal example (with `crane` for the build itself)
 
 ```yaml
 name: build
@@ -35,153 +25,82 @@ on: push
 permissions:
   contents: read
   packages: write
+  id-token: write          # required for cosign keyless
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
       IMAGE: ghcr.io/${{ github.repository }}
+      GO_VERSION: "1.22"
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 1 }
 
       - uses: alfredtm/yeet-cache-action@v1
         id: cache
         with:
           paths: cmd internal go.mod go.sum
+          extra: go=${{ env.GO_VERSION }} ldflags=-s -w
           image: ${{ env.IMAGE }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
+          sign: 'true'
           tags: ${{ github.sha }},latest
 
-      # Everything below this point runs ONLY on cache miss.
-      - uses: actions/setup-go@v5
-        if: steps.cache.outputs.hit == 'false'
-        with: { go-version: '1.22', cache-dependency-path: go.sum }
+      # Everything below runs ONLY on cache miss.
+      - if: steps.cache.outputs.hit == 'false'
+        uses: actions/setup-go@v5
+        with: { go-version: "${{ env.GO_VERSION }}", cache-dependency-path: go.sum }
 
-      - name: Build and push (only on cache miss)
-        if: steps.cache.outputs.hit == 'false'
+      - if: steps.cache.outputs.hit == 'false'
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
             go build -ldflags='-s -w' -trimpath -o app ./cmd/server
-
           mkdir -p _image/app && cp app _image/app/server
           tar -cf layer.tar -C _image .
-
-          # Tag the new image as src-<hash> so the NEXT run hits the cache.
-          crane append \
-            --base gcr.io/distroless/static:nonroot \
-            --new_layer layer.tar \
-            --new_tag "${{ steps.cache.outputs.src-tag }}"
+          crane append --base gcr.io/distroless/static:nonroot \
+            --new_layer layer.tar --new_tag "${{ steps.cache.outputs.src-tag }}"
           crane mutate "${{ steps.cache.outputs.src-tag }}" --entrypoint /app/server
-
-          # Also tag for release.
           crane tag "${{ steps.cache.outputs.src-tag }}" ${{ github.sha }}
           crane tag "${{ steps.cache.outputs.src-tag }}" latest
+
+      - uses: alfredtm/yeet-cache-action/sign@v1
+        if: steps.cache.outputs.hit == 'false'
+        with:
+          src-tag: ${{ steps.cache.outputs.src-tag }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-### With `ko`
-
-```yaml
-- uses: alfredtm/yeet-cache-action@v1
-  id: cache
-  with:
-    paths: cmd internal go.mod go.sum
-    image: ghcr.io/${{ github.repository }}/server
-    registry-password: ${{ secrets.GITHUB_TOKEN }}
-    tags: ${{ github.sha }},latest
-
-- uses: actions/setup-go@v5
-  if: steps.cache.outputs.hit == 'false'
-  with: { go-version: '1.22' }
-
-- uses: ko-build/setup-ko@v0.7
-  if: steps.cache.outputs.hit == 'false'
-
-- name: ko publish + tag for cache
-  if: steps.cache.outputs.hit == 'false'
-  env:
-    KO_DOCKER_REPO: ghcr.io/${{ github.repository_owner }}
-  run: |
-    ko publish --base-import-paths \
-      --tags "src-${{ steps.cache.outputs.src-hash }},${{ github.sha }},latest" \
-      ./cmd/server
-```
-
-### With `docker buildx`
-
-```yaml
-- uses: alfredtm/yeet-cache-action@v1
-  id: cache
-  with:
-    paths: . Dockerfile
-    image: ghcr.io/${{ github.repository }}
-    registry-password: ${{ secrets.GITHUB_TOKEN }}
-    tags: ${{ github.sha }},latest
-
-- uses: docker/setup-buildx-action@v3
-  if: steps.cache.outputs.hit == 'false'
-
-- uses: docker/login-action@v3
-  if: steps.cache.outputs.hit == 'false'
-  with:
-    registry: ghcr.io
-    username: ${{ github.actor }}
-    password: ${{ secrets.GITHUB_TOKEN }}
-
-- uses: docker/build-push-action@v6
-  if: steps.cache.outputs.hit == 'false'
-  with:
-    context: .
-    push: true
-    tags: |
-      ${{ steps.cache.outputs.src-tag }}
-      ghcr.io/${{ github.repository }}:${{ github.sha }}
-      ghcr.io/${{ github.repository }}:latest
-```
+Works the same in front of `ko`, `docker buildx`, `kaniko` — replace the build step, keep everything else.
 
 ## Inputs
 
-| Input | Required | Default | Description |
-|---|---|---|---|
-| `paths` | ✓ | — | Space-separated list of paths to hash. Use the paths whose contents determine the build output (e.g. `cmd internal go.mod go.sum`). Each path must exist in `HEAD`. |
-| `image` | ✓ | — | OCI image repository **without tag** (e.g. `ghcr.io/owner/repo`). |
-| `registry-password` | ✓ | — | Token for registry login. Usually `${{ secrets.GITHUB_TOKEN }}`. |
-| `registry` |  | `ghcr.io` | Registry hostname. |
-| `registry-username` |  | `${{ github.actor }}` | Registry username. |
-| `tags` |  | — | Comma-separated tags to retag the cached image to on a hit (e.g. `${{ github.sha }},latest`). Skipped on cache miss — caller is responsible for tagging on miss. |
-| `crane-version` |  | `latest` | Pinned crane release (e.g. `v0.20.2`) or `latest`. |
+| Input | Required | Description |
+|---|---|---|
+| `paths` | ✓ | Space-separated paths to hash via `git rev-parse HEAD:<path>`. |
+| `image` | ✓ | OCI image repository **without tag** (e.g. `ghcr.io/owner/repo`). |
+| `registry-password` | ✓ | Registry token. Usually `secrets.GITHUB_TOKEN`. |
+| `extra` |  | Free-form string mixed into the hash. Include build flags, toolchain version, base image digest. |
+| `sign` |  | `'true'` to verify cosign signature on cache hit. |
+| `tags` |  | Comma-separated tags to apply on hit (e.g. `${{ github.sha }},latest`). |
 
-## Outputs
+Outputs: `hit`, `src-hash`, `src-tag`, `cached-tag`. Full list in [`action.yml`](./action.yml).
 
-| Output | Description |
-|---|---|
-| `hit` | `"true"` if the cache contained an image for this source hash. |
-| `src-hash` | The 12-char content-address of the configured paths. |
-| `src-tag` | The full `<image>:src-<hash>` reference. Tag your freshly-built image with this on a cache miss. |
-| `cached-tag` | Same as `src-tag`, but only set on cache hit. Useful for `crane copy` / `crane mutate` workflows. |
+## Gotchas
 
-## Important: populating the cache on misses
+1. **`paths` must be tracked by git.** The action hashes via `git rev-parse HEAD:<path>`. Untracked / `.gitignore`'d files are invisible. Commit your files before relying on the hash.
 
-On a cache miss, **the caller must tag the freshly-built image with the `src-tag` output**. Otherwise the next run with identical sources will miss too. The simplest pattern: pass `${{ steps.cache.outputs.src-tag }}` as one of the build's output tags, or run `crane tag <new-image> ${{ steps.cache.outputs.src-tag }}` after pushing.
+2. **`extra` matters.** Without it the cache is unsound: two builds with different `-ldflags` produce different binaries but hit the same cache key. **Always include** the toolchain version, build flags, and base image digest.
 
-## What `paths` should I hash?
+3. **Pin your base image by digest, not tag.** `gcr.io/distroless/static:nonroot` is mutable — Google updates it. If your `extra` references a digest (`base=gcr.io/distroless/static@sha256:...`), the cache correctly invalidates when the base changes. The minimal example above uses the tag for brevity; the real demo at [`alfredtm/yeeted`](https://github.com/alfredtm/yeeted) resolves the digest dynamically.
 
-Hash the inputs that determine the build output. For a Go service that's typically:
+4. **Caller tags the built image with `src-tag` on miss.** The action computes `src-tag` but doesn't push to it — that's the build step's job (`--new_tag "${{ steps.cache.outputs.src-tag }}"`). Forget it, and the next run with the same source won't hit.
 
-- `cmd` and `internal` (or wherever your source lives)
-- `go.mod` and `go.sum` (dependency manifest)
+5. **`sign: 'true'` requires `permissions: id-token: write`.** Without it, cosign can't get an OIDC token and fails. Easy to forget.
 
-Do **not** hash:
-- The Dockerfile, if your build is Dockerfile-less. (For Dockerfile-based builds, do hash it.)
-- The `.github/workflows/` directory. (Workflow changes shouldn't invalidate builds.)
-- READMEs, docs, k8s manifests — these don't affect the binary.
+6. **Signed verification rejects unsigned cache entries.** When you first enable `sign: 'true'`, any pre-existing unsigned `:src-<hash>` tags fail verification (correctly — they're untrusted). Bump `extra` once (e.g. `extra: migration=2026-05`) to invalidate the old cache and start fresh.
 
-Including too much defeats the purpose (you'll cache-miss on doc edits). Including too little is dangerous (you'll cache-hit on stale source).
-
-## Determinism caveat
-
-This pattern assumes builds of unchanged source produce equivalent images. For Go that means using `-trimpath` and `-ldflags='-s -w'`. For other languages, set `SOURCE_DATE_EPOCH` and any other knobs your toolchain needs to produce reproducible output. If your build is non-deterministic (e.g. embeds timestamps or random IDs), this action will still skip — but the cached image may differ from what a fresh build would produce. That's usually fine; if it isn't, don't use this action.
+7. **Determinism is on you.** The action assumes identical inputs produce identical outputs. For Go: `-trimpath` + `-ldflags='-s -w'`. For other languages: set `SOURCE_DATE_EPOCH`. If your build embeds random IDs or timestamps, the cache still hits but the cached image may differ from a fresh build.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT.
