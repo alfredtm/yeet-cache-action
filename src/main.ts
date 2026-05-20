@@ -95,9 +95,17 @@ async function main(): Promise<void> {
 
     if (tags) {
       const tagStart = nowMs()
-      const tagResult = await run(yeetPack, ['tag', '--src', srcTag, '--tags', tags])
-      if (tagResult.exitCode !== 0) {
-        throw new Error(`yeet-pack tag failed: ${tagResult.stderr || tagResult.stdout}`)
+      const tagList = tags.split(',').map((t) => t.trim()).filter(Boolean)
+      const results = await Promise.all(
+        tagList.map(async (t) => {
+          const ref = t.includes('/') || t.includes('@') ? t : `${image}:${t}`
+          return run('crane', ['tag', srcTag, ref])
+        })
+      )
+      for (const r of results) {
+        if (r.exitCode !== 0) {
+          throw new Error(`crane tag failed: ${r.stderr || r.stdout}`)
+        }
       }
       logTiming('tag promotion', tagStart)
     }
