@@ -1,5 +1,5 @@
 import * as core from '@actions/core'
-import { logTiming, nowMs, run } from './lib.js'
+import { getYeetPackPath, logTiming, nowMs, run } from './lib.js'
 
 async function post(): Promise<void> {
   const hit = core.getState('hit')
@@ -19,15 +19,19 @@ async function post(): Promise<void> {
   }
 
   const start = nowMs()
-  const digestResult = await run('crane', ['digest', srcTag])
-  if (digestResult.exitCode !== 0) {
-    core.warning(`post: crane digest failed for ${srcTag}; image may not have been pushed. Skipping attestation. ${digestResult.stderr || digestResult.stdout}`)
-    return
+  let digest = process.env.YEET_PACK_DIGEST?.trim() || ''
+  if (!digest) {
+    const yeetPack = getYeetPackPath('')
+    const digestResult = await run(yeetPack, ['digest', '--image', srcTag])
+    if (digestResult.exitCode !== 0) {
+      core.warning(`post: yeet-pack digest failed for ${srcTag}; image may not have been pushed. ${digestResult.stderr || digestResult.stdout}`)
+      return
+    }
+    digest = digestResult.stdout.trim()
   }
-  const digest = digestResult.stdout.trim()
   const sha = digest.startsWith('sha256:') ? digest.slice('sha256:'.length) : digest
   if (!/^[0-9a-f]{64}$/.test(sha)) {
-    core.warning(`post: invalid digest from crane: ${digest}; skipping attestation`)
+    core.warning(`post: invalid digest ${digest}; skipping attestation`)
     return
   }
 

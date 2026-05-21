@@ -36,27 +36,6 @@ export async function which(tool: string): Promise<string | null> {
   return null
 }
 
-export async function installCrane(): Promise<string> {
-  const existing = await which('crane')
-  if (existing) return existing
-
-  if (os.platform() !== 'linux' || os.arch() !== 'x64') {
-    throw new Error(`crane auto-install is only supported on linux/amd64 runners (got ${os.platform()}/${os.arch()})`)
-  }
-
-  const url = 'https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz'
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crane-'))
-  await exec.exec('bash', ['-c', `curl -sSfL "${url}" | tar -xz -C "${tmp}" crane`])
-  const dest = '/usr/local/bin/crane'
-  try {
-    fs.renameSync(path.join(tmp, 'crane'), dest)
-  } catch {
-    await exec.exec('sudo', ['mv', path.join(tmp, 'crane'), dest])
-  }
-  fs.rmSync(tmp, { recursive: true, force: true })
-  return dest
-}
-
 export function getYeetPackPath(override: string): string {
   if (override) return override
   const bundled = path.join(__dirname, 'yeet-pack-linux-amd64')

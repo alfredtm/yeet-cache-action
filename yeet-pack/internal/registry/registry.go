@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -21,8 +23,94 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// minimalKeychain reads ~/.docker/config.json directly without pulling in
+// the docker/cli dependency that authn.DefaultKeychain uses internally.
+// Drops ~2MB from the resulting binary.
+type minimalKeychain struct{}
+
+func (minimalKeychain) Resolve(target authn.Resource) (authn.Authenticator, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return authn.Anonymous, nil
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".docker", "config.json"))
+	if err != nil {
+		return authn.Anonymous, nil
+	}
+	var cfg struct {
+		Auths map[string]struct {
+			Auth string `json:"auth"`
+		} `json:"auths"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return authn.Anonymous, nil
+	}
+	entry, ok := cfg.Auths[target.RegistryStr()]
+	if !ok {
+		return authn.Anonymous, nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(entry.Auth)
+	if err != nil {
+		return authn.Anonymous, nil
+	}
+	parts := strings.SplitN(string(decoded), ":", 2)
+	if len(parts) != 2 {
+		return authn.Anonymous, nil
+	}
+	return &authn.Basic{Username: parts[0], Password: parts[1]}, nil
+}
+
 func auth() remote.Option {
-	return remote.WithAuthFromKeychain(authn.DefaultKeychain)
+	return remote.WithAuthFromKeychain(minimalKeychain{})
+}
+
+// Login writes a minimal ~/.docker/config.json entry for the given registry
+// so subsequent go-containerregistry calls (and any other tool that reads
+// docker config) can authenticate. Replaces shelling out to crane/docker login.
+func Login(registry, username, password string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(home, ".docker")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	cfgPath := filepath.Join(dir, "config.json")
+
+	var cfg map[string]any
+	if data, err := os.ReadFile(cfgPath); err == nil {
+		_ = json.Unmarshal(data, &cfg)
+	}
+	if cfg == nil {
+		cfg = map[string]any{}
+	}
+	auths, _ := cfg["auths"].(map[string]any)
+	if auths == nil {
+		auths = map[string]any{}
+	}
+	authStr := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+	auths[registry] = map[string]any{"auth": authStr}
+	cfg["auths"] = auths
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cfgPath, data, 0o600)
+}
+
+// Digest returns the sha256 digest of an image's manifest.
+func Digest(ref string) (string, error) {
+	r, err := name.ParseReference(ref)
+	if err != nil {
+		return "", err
+	}
+	desc, err := remote.Head(r, auth())
+	if err != nil {
+		return "", err
+	}
+	return desc.Digest.String(), nil
 }
 
 // Exists returns true if the manifest exists. Uses HEAD via remote.Head.
@@ -33,7 +121,6 @@ func Exists(ref string) (bool, error) {
 	}
 	_, err = remote.Head(r, auth())
 	if err != nil {
-		// transport errors with 404 status are returned as *transport.Error.
 		if strings.Contains(err.Error(), "MANIFEST_UNKNOWN") || strings.Contains(err.Error(), "NAME_UNKNOWN") || strings.Contains(err.Error(), "404") {
 			return false, nil
 		}
@@ -150,8 +237,6 @@ func binaryLayer(binaryPath, pathInImage string) (v1.Layer, error) {
 	return tarball.LayerFromOpener(opener, tarball.WithMediaType(types.DockerLayer))
 }
 
-// tagParallel applies each tag in dsts to the image, in parallel. Tags may be
-// bare ("crane-abc1234") in which case they're resolved against primary's repo.
 func tagParallel(primary name.Reference, dsts []string, img v1.Image) error {
 	repo := primary.Context()
 	g, _ := errgroup.WithContext(context.Background())
@@ -171,7 +256,6 @@ func tagParallel(primary name.Reference, dsts []string, img v1.Image) error {
 	return g.Wait()
 }
 
-// resolveTag interprets t as either a full ref or a bare tag relative to repo.
 func resolveTag(repo name.Repository, t string) (name.Reference, error) {
 	if strings.Contains(t, "/") || strings.Contains(t, "@") {
 		return name.ParseReference(t)

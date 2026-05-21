@@ -1,15 +1,39 @@
 import * as core from '@actions/core'
-import * as exec from '@actions/exec'
+import * as crypto from 'node:crypto'
 import {
   defaultVerifyIdentity,
   exposeYeetPackOnPath,
   getYeetPackPath,
-  installCrane,
   logTiming,
   nowMs,
   ownerFromImage,
   run,
 } from './lib.js'
+
+async function computeHashViaApi(paths: string[], extra: string, token: string): Promise<string> {
+  const repo = process.env.GITHUB_REPOSITORY
+  const sha = process.env.GITHUB_SHA
+  if (!repo || !sha) throw new Error('GITHUB_REPOSITORY / GITHUB_SHA not set')
+
+  const env = { ...process.env, GH_TOKEN: token }
+  const commitRes = await run('gh', ['api', `repos/${repo}/git/commits/${sha}`, '-q', '.tree.sha'], { env })
+  if (commitRes.exitCode !== 0) throw new Error(`gh api git/commits failed: ${commitRes.stderr}`)
+  const treeSha = commitRes.stdout.trim()
+
+  const treeRes = await run('gh', ['api', `repos/${repo}/git/trees/${treeSha}`], { env })
+  if (treeRes.exitCode !== 0) throw new Error(`gh api git/trees failed: ${treeRes.stderr}`)
+  const tree = JSON.parse(treeRes.stdout) as { tree: Array<{ path: string; sha: string }> }
+
+  const shas: string[] = []
+  for (const p of paths) {
+    const entry = tree.tree.find((e) => e.path === p)
+    if (!entry) throw new Error(`path not found in tree: ${p}`)
+    shas.push(entry.sha)
+  }
+
+  const input = shas.map((s) => s + '\n').join('') + `extra:${extra}\n`
+  return crypto.createHash('sha256').update(input).digest('hex').slice(0, 12)
+}
 
 async function main(): Promise<void> {
   const paths = core.getInput('paths')
@@ -23,6 +47,7 @@ async function main(): Promise<void> {
   const sign = core.getInput('sign') === 'true'
   const verifyOnHit = (core.getInput('verify-on-hit') || 'true') === 'true'
   const verifyIdentity = core.getInput('verify-identity') || defaultVerifyIdentity()
+  const viaApi = core.getInput('via-api') === 'true'
   const yeetPackOverride = core.getInput('yeet-pack-binary-path')
 
   if (!hashInput && !paths) {
@@ -36,14 +61,16 @@ async function main(): Promise<void> {
   if (hashInput) {
     hash = hashInput
   } else {
-    const args = ['hash']
-    if (paths) args.push('--paths', paths.trim().split(/\s+/).join(','))
-    if (extra) args.push('--extra', extra)
-    const result = await run(yeetPack, args)
-    if (result.exitCode !== 0) {
-      throw new Error(`yeet-pack hash failed: ${result.stderr || result.stdout}`)
+    const pathsList = paths.trim().split(/\s+/).filter(Boolean)
+    if (viaApi) {
+      hash = await computeHashViaApi(pathsList, extra, registryPassword)
+    } else {
+      const result = await run(yeetPack, ['hash', '--paths', pathsList.join(','), '--extra', extra])
+      if (result.exitCode !== 0) {
+        throw new Error(`yeet-pack hash failed: ${result.stderr || result.stdout}`)
+      }
+      hash = result.stdout.trim()
     }
-    hash = result.stdout.trim()
   }
 
   if (!/^[0-9a-f]{12}$/.test(hash)) {
@@ -55,14 +82,16 @@ async function main(): Promise<void> {
   core.setOutput('src-tag', srcTag)
   core.notice(`source hash = ${hash}`)
 
-  await installCrane()
   const loginStart = nowMs()
-  const loginExit = await exec.exec('crane', ['auth', 'login', registry, '-u', registryUsername, '--password-stdin'], {
-    input: Buffer.from(registryPassword),
-    silent: true,
-    ignoreReturnCode: true,
-  })
-  if (loginExit !== 0) throw new Error(`crane auth login failed (exit ${loginExit})`)
+  const loginRes = await run(yeetPack, [
+    'login',
+    '--registry', registry,
+    '--username', registryUsername,
+    '--password-stdin',
+  ], { input: Buffer.from(registryPassword), silent: true })
+  if (loginRes.exitCode !== 0) {
+    throw new Error(`yeet-pack login failed: ${loginRes.stderr || loginRes.stdout}`)
+  }
   logTiming('registry login', loginStart)
 
   const checkStart = nowMs()
@@ -97,11 +126,11 @@ async function main(): Promise<void> {
       const tagStart = nowMs()
       const tagList = tags.split(',').map((t) => t.trim()).filter(Boolean)
       const results = await Promise.all(
-        tagList.map((t) => run('crane', ['tag', srcTag, t]))
+        tagList.map((t) => run(yeetPack, ['tag', '--src', srcTag, '--tags', t]))
       )
       for (const r of results) {
         if (r.exitCode !== 0) {
-          throw new Error(`crane tag failed: ${r.stderr || r.stdout}`)
+          throw new Error(`yeet-pack tag failed: ${r.stderr || r.stdout}`)
         }
       }
       logTiming('tag promotion', tagStart)

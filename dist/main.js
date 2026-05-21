@@ -25684,7 +25684,6 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.run = run;
 exports.which = which;
-exports.installCrane = installCrane;
 exports.getYeetPackPath = getYeetPackPath;
 exports.exposeYeetPackOnPath = exposeYeetPackOnPath;
 exports.ownerFromImage = ownerFromImage;
@@ -25721,26 +25720,6 @@ async function which(tool) {
         // fall through
     }
     return null;
-}
-async function installCrane() {
-    const existing = await which('crane');
-    if (existing)
-        return existing;
-    if (os.platform() !== 'linux' || os.arch() !== 'x64') {
-        throw new Error(`crane auto-install is only supported on linux/amd64 runners (got ${os.platform()}/${os.arch()})`);
-    }
-    const url = 'https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz';
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crane-'));
-    await exec.exec('bash', ['-c', `curl -sSfL "${url}" | tar -xz -C "${tmp}" crane`]);
-    const dest = '/usr/local/bin/crane';
-    try {
-        fs.renameSync(path.join(tmp, 'crane'), dest);
-    }
-    catch {
-        await exec.exec('sudo', ['mv', path.join(tmp, 'crane'), dest]);
-    }
-    fs.rmSync(tmp, { recursive: true, force: true });
-    return dest;
 }
 function getYeetPackPath(override) {
     if (override)
@@ -25829,8 +25808,32 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const core = __importStar(__nccwpck_require__(7484));
-const exec = __importStar(__nccwpck_require__(5236));
+const crypto = __importStar(__nccwpck_require__(7598));
 const lib_js_1 = __nccwpck_require__(5704);
+async function computeHashViaApi(paths, extra, token) {
+    const repo = process.env.GITHUB_REPOSITORY;
+    const sha = process.env.GITHUB_SHA;
+    if (!repo || !sha)
+        throw new Error('GITHUB_REPOSITORY / GITHUB_SHA not set');
+    const env = { ...process.env, GH_TOKEN: token };
+    const commitRes = await (0, lib_js_1.run)('gh', ['api', `repos/${repo}/git/commits/${sha}`, '-q', '.tree.sha'], { env });
+    if (commitRes.exitCode !== 0)
+        throw new Error(`gh api git/commits failed: ${commitRes.stderr}`);
+    const treeSha = commitRes.stdout.trim();
+    const treeRes = await (0, lib_js_1.run)('gh', ['api', `repos/${repo}/git/trees/${treeSha}`], { env });
+    if (treeRes.exitCode !== 0)
+        throw new Error(`gh api git/trees failed: ${treeRes.stderr}`);
+    const tree = JSON.parse(treeRes.stdout);
+    const shas = [];
+    for (const p of paths) {
+        const entry = tree.tree.find((e) => e.path === p);
+        if (!entry)
+            throw new Error(`path not found in tree: ${p}`);
+        shas.push(entry.sha);
+    }
+    const input = shas.map((s) => s + '\n').join('') + `extra:${extra}\n`;
+    return crypto.createHash('sha256').update(input).digest('hex').slice(0, 12);
+}
 async function main() {
     const paths = core.getInput('paths');
     const hashInput = core.getInput('hash');
@@ -25843,6 +25846,7 @@ async function main() {
     const sign = core.getInput('sign') === 'true';
     const verifyOnHit = (core.getInput('verify-on-hit') || 'true') === 'true';
     const verifyIdentity = core.getInput('verify-identity') || (0, lib_js_1.defaultVerifyIdentity)();
+    const viaApi = core.getInput('via-api') === 'true';
     const yeetPackOverride = core.getInput('yeet-pack-binary-path');
     if (!hashInput && !paths) {
         throw new Error("either 'paths' or 'hash' input must be provided");
@@ -25854,16 +25858,17 @@ async function main() {
         hash = hashInput;
     }
     else {
-        const args = ['hash'];
-        if (paths)
-            args.push('--paths', paths.trim().split(/\s+/).join(','));
-        if (extra)
-            args.push('--extra', extra);
-        const result = await (0, lib_js_1.run)(yeetPack, args);
-        if (result.exitCode !== 0) {
-            throw new Error(`yeet-pack hash failed: ${result.stderr || result.stdout}`);
+        const pathsList = paths.trim().split(/\s+/).filter(Boolean);
+        if (viaApi) {
+            hash = await computeHashViaApi(pathsList, extra, registryPassword);
         }
-        hash = result.stdout.trim();
+        else {
+            const result = await (0, lib_js_1.run)(yeetPack, ['hash', '--paths', pathsList.join(','), '--extra', extra]);
+            if (result.exitCode !== 0) {
+                throw new Error(`yeet-pack hash failed: ${result.stderr || result.stdout}`);
+            }
+            hash = result.stdout.trim();
+        }
     }
     if (!/^[0-9a-f]{12}$/.test(hash)) {
         throw new Error(`invalid hash (expected 12 hex chars): ${hash}`);
@@ -25872,15 +25877,16 @@ async function main() {
     core.setOutput('src-hash', hash);
     core.setOutput('src-tag', srcTag);
     core.notice(`source hash = ${hash}`);
-    await (0, lib_js_1.installCrane)();
     const loginStart = (0, lib_js_1.nowMs)();
-    const loginExit = await exec.exec('crane', ['auth', 'login', registry, '-u', registryUsername, '--password-stdin'], {
-        input: Buffer.from(registryPassword),
-        silent: true,
-        ignoreReturnCode: true,
-    });
-    if (loginExit !== 0)
-        throw new Error(`crane auth login failed (exit ${loginExit})`);
+    const loginRes = await (0, lib_js_1.run)(yeetPack, [
+        'login',
+        '--registry', registry,
+        '--username', registryUsername,
+        '--password-stdin',
+    ], { input: Buffer.from(registryPassword), silent: true });
+    if (loginRes.exitCode !== 0) {
+        throw new Error(`yeet-pack login failed: ${loginRes.stderr || loginRes.stdout}`);
+    }
     (0, lib_js_1.logTiming)('registry login', loginStart);
     const checkStart = (0, lib_js_1.nowMs)();
     const check = await (0, lib_js_1.run)(yeetPack, ['check', '--image', srcTag]);
@@ -25911,10 +25917,10 @@ async function main() {
         if (tags) {
             const tagStart = (0, lib_js_1.nowMs)();
             const tagList = tags.split(',').map((t) => t.trim()).filter(Boolean);
-            const results = await Promise.all(tagList.map((t) => (0, lib_js_1.run)('crane', ['tag', srcTag, t])));
+            const results = await Promise.all(tagList.map((t) => (0, lib_js_1.run)(yeetPack, ['tag', '--src', srcTag, '--tags', t])));
             for (const r of results) {
                 if (r.exitCode !== 0) {
-                    throw new Error(`crane tag failed: ${r.stderr || r.stdout}`);
+                    throw new Error(`yeet-pack tag failed: ${r.stderr || r.stdout}`);
                 }
             }
             (0, lib_js_1.logTiming)('tag promotion', tagStart);

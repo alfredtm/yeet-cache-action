@@ -25684,7 +25684,6 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.run = run;
 exports.which = which;
-exports.installCrane = installCrane;
 exports.getYeetPackPath = getYeetPackPath;
 exports.exposeYeetPackOnPath = exposeYeetPackOnPath;
 exports.ownerFromImage = ownerFromImage;
@@ -25721,26 +25720,6 @@ async function which(tool) {
         // fall through
     }
     return null;
-}
-async function installCrane() {
-    const existing = await which('crane');
-    if (existing)
-        return existing;
-    if (os.platform() !== 'linux' || os.arch() !== 'x64') {
-        throw new Error(`crane auto-install is only supported on linux/amd64 runners (got ${os.platform()}/${os.arch()})`);
-    }
-    const url = 'https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz';
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'crane-'));
-    await exec.exec('bash', ['-c', `curl -sSfL "${url}" | tar -xz -C "${tmp}" crane`]);
-    const dest = '/usr/local/bin/crane';
-    try {
-        fs.renameSync(path.join(tmp, 'crane'), dest);
-    }
-    catch {
-        await exec.exec('sudo', ['mv', path.join(tmp, 'crane'), dest]);
-    }
-    fs.rmSync(tmp, { recursive: true, force: true });
-    return dest;
 }
 function getYeetPackPath(override) {
     if (override)
@@ -25846,15 +25825,19 @@ async function post() {
         return;
     }
     const start = (0, lib_js_1.nowMs)();
-    const digestResult = await (0, lib_js_1.run)('crane', ['digest', srcTag]);
-    if (digestResult.exitCode !== 0) {
-        core.warning(`post: crane digest failed for ${srcTag}; image may not have been pushed. Skipping attestation. ${digestResult.stderr || digestResult.stdout}`);
-        return;
+    let digest = process.env.YEET_PACK_DIGEST?.trim() || '';
+    if (!digest) {
+        const yeetPack = (0, lib_js_1.getYeetPackPath)('');
+        const digestResult = await (0, lib_js_1.run)(yeetPack, ['digest', '--image', srcTag]);
+        if (digestResult.exitCode !== 0) {
+            core.warning(`post: yeet-pack digest failed for ${srcTag}; image may not have been pushed. ${digestResult.stderr || digestResult.stdout}`);
+            return;
+        }
+        digest = digestResult.stdout.trim();
     }
-    const digest = digestResult.stdout.trim();
     const sha = digest.startsWith('sha256:') ? digest.slice('sha256:'.length) : digest;
     if (!/^[0-9a-f]{64}$/.test(sha)) {
-        core.warning(`post: invalid digest from crane: ${digest}; skipping attestation`);
+        core.warning(`post: invalid digest ${digest}; skipping attestation`);
         return;
     }
     try {

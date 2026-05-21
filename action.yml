@@ -14,6 +14,10 @@ inputs:
     description: 'Pre-computed 12-char source hash. Bypasses paths/git. Useful for skipping checkout on cache hits.'
     required: false
     default: ''
+  via-api:
+    description: 'When "true" and `paths` is set, compute the hash via GitHub git API (gh api repos/.../git/trees/...) instead of git rev-parse. Lets you skip actions/checkout on cache hits.'
+    required: false
+    default: 'false'
   image:
     description: 'OCI image repository without tag (e.g. ghcr.io/owner/repo).'
     required: true
