@@ -100,11 +100,28 @@ Outputs: `hit`, `src-hash`, `src-tag`, `cached-tag`. See [`action.yml`](./action
 - **Migrating from v1 (cosign) to v2 (attestation)?** Bump `extra` once (`extra: migration=v2`) to yeet the old cosign-signed cache entries into the void. They'd fail verification under v2 anyway.
 - **Determinism is on you.** `-trimpath` + `-ldflags='-s -w'` for Go. `SOURCE_DATE_EPOCH` for everything else.
 
+## What ships with the action
+
+Two artifacts, both committed under `dist/` and downloaded together when you `uses: alfredtm/yeet-cache-action@v2`:
+
+| File | What it is | Role |
+|---|---|---|
+| `dist/main.js` (~1MB) | Node 20 JavaScript, compiled from TypeScript | Runs at the start of the step. Parses inputs, computes the hash, checks the registry, retags on hit. |
+| `dist/post.js` (~1MB) | Same — runs *after* your other steps finish | On cache miss, signs the newly-built image via `@actions/attest`. |
+| `dist/yeet-pack-linux-amd64` (~7MB) | A Go binary using [go-containerregistry](https://github.com/google/go-containerregistry) | Does the actual heavy lifting: hash, registry HEAD check, in-memory image construction, parallel retag. The JS copies it to `/usr/local/bin/yeet-pack` on every run so your own workflow steps can call it too (that's the `yeet-pack pack` line in the example). |
+
+**Why the split?** GitHub Actions can only execute JavaScript, a Docker container, or composite YAML — it can't run a Go binary as the action's entry point. So the JS is the conductor (~200 lines of orchestration: parse inputs, decide hit vs miss, call `gh attestation verify`), and the Go binary is the instrument that actually talks to the OCI registry. The JS shells out to the Go binary; the user's own workflow steps can too.
+
 ## How it works
 
-A node20 action with a bundled Go helper (`yeet-pack`, ~7MB). On every run: compute a 12-char hash from your declared paths + extra, ask the registry if `<image>:src-<hash>` exists. Hit → retag. Miss → emit the tag and let you build. Post hook attests fresh builds via `@actions/attest`. Verify on hit uses `gh attestation verify` (gh CLI is already on the runner).
+On every run: compute a 12-char hash from your declared `paths` + `extra`, ask the registry if `<image>:src-<hash>` exists.
 
-No Docker daemon. No Dockerfile required. No crane install. See [SPEC.md](./SPEC.md) for the `:src-<hex>` tag convention.
+- **Hit** → optionally verify the attestation → retag the cached image to your release tags → done in ~1.5s of actual work.
+- **Miss** → emit `src-tag` and let your build steps push to it. The post hook signs the new image via `@actions/attest` so the next run can verify it.
+
+Verification on hit uses `gh attestation verify` (the `gh` CLI is pre-installed on GitHub-hosted runners). No Docker daemon. No Dockerfile required. No crane install.
+
+See [SPEC.md](./SPEC.md) for the `:src-<hex>` tag convention.
 
 ## v1
 
