@@ -100,7 +100,7 @@ Cache check, signing, retag — all handled by the `uses:` line. The `yeet-pack`
 
 ### Live example
 
-The numbers above were measured from [**alfredtm/yeeted**](https://github.com/alfredtm/yeeted) — a working Go service shipping with three side-by-side workflows: `build-crane.yml` (this action), `build-docker.yml` (`docker buildx`), `build-ko.yml` (`ko publish`). Every push runs all three; the [Actions tab](https://github.com/alfredtm/yeeted/actions) is a live benchmark. Fork it as a starting point.
+The numbers above were measured from [**alfredtm/yeeted**](https://github.com/alfredtm/yeeted) — a working Go service shipping with three side-by-side workflows: `build-yeet.yml` (this action), `build-docker.yml` (`docker buildx`), `build-ko.yml` (`ko publish`). Every push runs all three; the [Actions tab](https://github.com/alfredtm/yeeted/actions) is a live benchmark. Fork it as a starting point.
 
 ## Inputs
 
