@@ -25,6 +25,15 @@ Teams running CI on every push to a Go service. Especially when most pushes are 
 
 Not strictly Go-only — the cache check, signing, and retag logic works in front of `ko`, `docker buildx`, `kaniko`, anything. The bundled `yeet-pack pack` helper is the Go-specific bit and is optional.
 
+## Your PR is your deploy
+
+The cache key hashes the source *tree*, not the commit SHA. Two commits with identical files produce the same hash. So:
+
+1. **Open a PR** → workflow runs on each push to the branch → builds and pushes the image once (~22s).
+2. **Merge it** → the merge commit's tree is identical to the PR's tip → cache HIT → retag `latest` in ~10s.
+
+Your deploy time *is* the cache-hit time. No rebuild on merge, no re-upload, no recompile — the work happened while the PR was open. Works for normal merges, squash merges, and rebases — anything that produces a tree your PR has already built.
+
 ---
 
 ## Numbers
