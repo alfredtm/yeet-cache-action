@@ -141,7 +141,7 @@ No Docker daemon. No Dockerfile required. No crane install. See [SPEC.md](./SPEC
 
 ## v1
 
-v1 was a composite YAML action using cosign for signatures. Still maintained at `@v1`. Use it if you prefer cosign or want a transparent bash-only action you can fork. Roughly the same cache-hit speed; slightly slower cache miss (Rekor upload dominates unless `tlog-upload: 'false'`).
+v1 was a composite YAML action using cosign for signatures. **No longer maintained** — pinned at v1.3.0 for anyone who still references it. New work happens on v2; use `@v2` for any new project.
 
 ## License
 
