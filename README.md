@@ -1,6 +1,6 @@
 # yeet-cache-action
 
-**Stop building images you've already built.**
+**Stop building images you've already built.** Yeet the cached one at your release tags instead.
 
 Same Go service, same CI. Different mental model.
 
@@ -9,9 +9,9 @@ Same Go service, same CI. Different mental model.
 | Build (cache miss) | 66s | 20s | **22s** |
 | No-op push (cache hit) | 66s | 20s | **12s** ← ~1.4s actual work |
 
-The trick: use your OCI registry as a content-addressed cache. If you've built this exact source before, the image is already there. Don't rebuild it — *retag it.* In ~1 second.
+The trick: use your OCI registry as a content-addressed cache. If you've built this exact source before, the image is already there. Don't rebuild — *yeet the manifest at your release tags.* In ~1 second.
 
-## Use it
+## Yeet it
 
 ```yaml
 name: build
@@ -63,9 +63,9 @@ jobs:
             --also-tag "${{ github.sha }},latest"
 ```
 
-That's the whole thing. Cache check, attestation, retag — all handled. `yeet-pack` is bundled with the action and installed on PATH automatically.
+That's the yeet. Cache check, attestation, retag — all handled. `yeet-pack` is bundled with the action and installed on PATH automatically.
 
-**Not building Go?** Swap the last step for `ko publish`, `docker buildx`, `kaniko`, whatever. Just push your image to `${{ steps.cache.outputs.src-tag }}` so the next run hits.
+**Not building Go?** Swap the last step for `ko publish`, `docker buildx`, `kaniko`, whatever. Just yeet your image at `${{ steps.cache.outputs.src-tag }}` so the next run hits.
 
 ## Inputs
 
@@ -91,7 +91,7 @@ Outputs: `hit`, `src-hash`, `src-tag`, `cached-tag`. See [`action.yml`](./action
 - **`extra` matters.** Different `-ldflags` = different binary = should be a different cache key. Mix toolchain version, build flags, base digest. The action doesn't infer.
 - **`sign: 'true'` needs both `id-token: write` AND `attestations: write` permissions.** The failure message if you forget is unhelpful.
 - **Cache miss requires the caller to push the built image at `steps.cache.outputs.src-tag`.** `yeet-pack pack --tag ...` is one line. Forget it and the next run misses again.
-- **Migrating from v1 (cosign) to v2 (attestation)?** Bump `extra` once (`extra: migration=v2`) to invalidate the old cosign-signed cache entries. They'll fail verification under v2 — correctly.
+- **Migrating from v1 (cosign) to v2 (attestation)?** Bump `extra` once (`extra: migration=v2`) to yeet the old cosign-signed cache entries into the void. They'd fail verification under v2 anyway.
 - **Determinism is on you.** `-trimpath` + `-ldflags='-s -w'` for Go. `SOURCE_DATE_EPOCH` for everything else.
 
 ## How it works
@@ -106,4 +106,4 @@ Composite YAML + cosign instead of JS + GitHub attestation. Still maintained at 
 
 ## License
 
-MIT.
+MIT. Yeet responsibly.
