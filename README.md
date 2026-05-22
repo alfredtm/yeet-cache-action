@@ -2,7 +2,7 @@
 
 **Stop building images you've already built.** Yeet the cached one at your release tags instead.
 
-Same Go service, same CI. Different mental model.
+Measured on `ubuntu-latest` against a Go service with chi + pgx + otel + prometheus deps:
 
 | | docker buildx | ko publish | **yeet-cache-action@v2** |
 |---|---|---|---|
@@ -47,7 +47,13 @@ jobs:
 
       - if: steps.cache.outputs.hit == 'false'
         uses: actions/checkout@v4
-        with: { sparse-checkout: "cmd\ninternal\ngo.mod\ngo.sum", sparse-checkout-cone-mode: false }
+        with:
+          sparse-checkout: |
+            cmd
+            internal
+            go.mod
+            go.sum
+          sparse-checkout-cone-mode: false
 
       - if: steps.cache.outputs.hit == 'false'
         uses: actions/setup-go@v5
